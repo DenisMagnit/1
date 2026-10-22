@@ -120,15 +120,19 @@ def pcap(p, num):
 
 # ================= РАСПРЕДЕЛЕНИЕ (единый набор правил) =================
 # Правила (по сентябрю + согласованные уточнения):
-#  R1  задачи — только своей должности по каталогу, активные в октябре; исключение — Клименко (EXCEPT)
-#  R2  доли: продакты 60% CAPEX / 40% OPEX; руководители команд 30/70; менеджмент, сопровождение,
-#      остальные (включая ведущего разработчика проекта Эдтех) — 100% CAPEX
+#  R1  задачи — своей должности по каталогу, активные в октябре; задачи той же профессии соседнего грейда
+#      (тот же вид работ, сначала тот же грейд) — только если своих не хватает по срокам или для 2-й
+#      CAPEX-задачи; исключение — Клименко (EXCEPT)
+#  R2  доли: продакты 60% CAPEX / 40% OPEX; руководители команд 30/70; должности без CAPEX-задач в
+#      октябре (директор, руководители управлений/направлений, менеджер и руководитель проектов,
+#      инженеры сопровождения) — 100% OPEX; остальные (включая ведущего разработчика Эдтех) — 100% CAPEX
 #  R3  у кого есть CAPEX — не менее 2 CAPEX-задач: основная ~70%, вторая ~30% (кратно 8, не менее 16 ч);
 #      100% OPEX — одна задача (как в сентябре), вторая только если упираемся в лимит
 #  R4  ≤ 350 ч на задачу в месяц; ≤ 8 ч × ставка × раб. дни сотрудника в периоде работ по задаче
 #  R5  преемственность: задачи сентября, которые идут в октябре, сохраняются (OPEX 3 кв. → 4 кв.)
 #  R6  новые задачи — сначала незанятые/наименее загруженные (покрытие каталога), вторая — из того же эпика
-#  R7  строк < 8 ч не оставляем
+#  R7  строк < 8 ч не оставляем; лишние CAPEX-строки < 16 ч (при 3+ CAPEX-задачах) вливаем в другие
+#  R8  строки сотрудника — по убыванию часов (как в сентябре)
 SECOND_SHARE, SECOND_MIN, ROW_MIN = 0.3, 16, 8
 EXCEPT = {"Главный инженер по поддержке оборудования": ["ADTHPL-202"]}  # приемка и подготовка к запуску
 
@@ -188,6 +192,18 @@ FAMILY = [{"Специалист по тестированию", "Ведущий
           {"Ведущий специалист ML"},
           {"Менеджер продукта", "Ведущий менеджер продукта"}]
 
+GRADE = {"Специалист по тестированию": 0, "Ведущий специалист по тестированию": 1,
+         "Главный специалист по тестированию": 2, "Аналитик данных": 0, "Ведущий аналитик данных": 1,
+         "Разработчик": 0, "Ведущий разработчик": 1, "Главный разработчик": 2,
+         "Ведущий разработчик проекта Эдтех": 1, "Системный аналитик": 0, "Ведущий системный аналитик": 1,
+         "Главный системный аналитик": 2, "Менеджер продукта": 0, "Ведущий менеджер продукта": 1}
+
+def grade_gap(p, n):
+    r = TASK[n].Должность
+    if r == p["role"] or n in EXCEPT.get(p["role"], []):
+        return 0
+    return abs(GRADE.get(r, 9) - GRADE.get(p["role"], 9)) or 0.5   # тот же грейд другой должности — после своих
+
 def pool(p, flag):
     own = list(role_tasks[(p["role"], flag)])
     if flag == "CAPEX":
@@ -201,6 +217,15 @@ def family_pool(p, flag):
     kinds = {TASK[n]._5 for n in role_tasks[(p["role"], flag)]}
     return [r.num for r in active.itertuples() if r.Признак == flag and r.Должность in fam
             and r.Должность != p["role"] and r._5 in kinds]
+
+def move(p, src, dst, h):
+    """Перенос h часов сотрудника с задачи src на dst с полной проверкой ограничений."""
+    a = alloc[p["fio"]]
+    h = min(h, a[src])
+    a[src] -= h; load[src] -= h
+    got = give(p, dst, h)
+    a[src] += h - got; load[src] += h - got
+    return got
 
 def taken(p, flag):
     return [n for n in alloc[p["fio"]] if TASK[n].Признак == flag]
@@ -235,7 +260,8 @@ def pick(p, flag, need, main=None, prefer=(), new_only=False, src=None):
     if not cands:
         return None
     ep = TASK[main].Эпик if main else None
-    return min(cands, key=lambda n: (n not in alloc[p["fio"]], n not in prefer, room(p, n) < min(need, 40),
+    return min(cands, key=lambda n: (n not in alloc[p["fio"]], n not in prefer, grade_gap(p, n),
+                                     room(p, n) < min(need, 40),
                                      ep is not None and TASK[n].Эпик != ep,
                                      room(p, n) < need, load[n] > 0, load[n], -room(p, n), n))
 
@@ -258,8 +284,8 @@ for p in order:
                 n = pick(p, "CAPEX", need, main, prefer, new_only=True)
                 if not n:
                     break
-                h = give(p, n, need)
-                alloc[p["fio"]][main] -= h; load[main] -= h
+                if move(p, main, n, need) <= 0:
+                    break
                 continue
             n = pick(p, "CAPEX", need, main, prefer, new_only=len(taken(p, "CAPEX")) < 2)
             if not n:
@@ -268,7 +294,7 @@ for p in order:
     guard = 0
     while p["left"]["OPEX"] > 0.001 and guard < 8:
         guard += 1
-        n = pick(p, "OPEX", p["left"]["OPEX"])
+        n = pick(p, "OPEX", p["left"]["OPEX"], prefer=[m for m, _ in p["cont"]["OPEX"]])
         if not n:
             break
         p["left"]["OPEX"] -= give(p, n, p["left"]["OPEX"])
@@ -293,7 +319,21 @@ for p in order:
                 break
             p["left"][f] -= give(p, n, p["left"][f])
 
-# Фаза 4 — строки < 8 ч добиваем до 8 ч за счет основной задачи того же признака
+# Фаза 4a — лишние CAPEX-строки < 16 ч (если CAPEX-задач 3 и более) вливаем в другие CAPEX-задачи
+for p in people:
+    a = alloc[p["fio"]]
+    for n in sorted(list(a), key=lambda m: a[m]):
+        if n not in a or TASK[n].Признак != "CAPEX" or a[n] >= SECOND_MIN or len(taken(p, "CAPEX")) < 3:
+            continue
+        h = a.pop(n); load[n] -= h
+        for m in sorted(taken(p, "CAPEX"), key=lambda m: -a[m]):
+            h -= give(p, m, h)
+            if h <= 0.001:
+                break
+        if h > 0.001:                              # не влилось целиком — возвращаем остаток
+            a[n] = a.get(n, 0) + h; load[n] += h
+
+# Фаза 4b — строки < 8 ч добиваем до 8 ч за счет основной задачи того же признака
 for p in people:
     a = alloc[p["fio"]]
     for n, h in list(a.items()):
@@ -302,9 +342,7 @@ for p in people:
             if not same:
                 continue
             big = max(same, key=a.get)
-            need = min(ROW_MIN - h, CAP_TASK - load[n], pcap(p, n) - h)
-            if need > 0:
-                a[n] += need; load[n] += need; a[big] -= need; load[big] -= need
+            move(p, big, n, ROW_MIN - h)
 
 borrowed = {p["fio"]: [n for n in alloc[p["fio"]] if TASK[n].Должность != p["role"]] for p in people}
 borrowed = {k: v for k, v in borrowed.items() if v}
@@ -335,7 +373,7 @@ DATEFMT = "dd.mm.yyyy"
 for p in people:
     v = [c.value for c in p["cells"]]
     items = list(alloc[p["fio"]].items())
-    items.sort(key=lambda x: (TASK[x[0]].Признак != "CAPEX", -x[1]))  # CAPEX первым, как в сентябре
+    items.sort(key=lambda x: (-x[1], TASK[x[0]].Признак != "CAPEX"))  # по убыванию часов, как в сентябре
     for num, h in items:
         t = TASK[num]
         s, e, _ = task_window(p, num)
