@@ -210,7 +210,10 @@ SECOND_SHARE = 0.3
 # у должностей с единственной задачей в каталоге на октябрь — смысловая пара
 PREFER = {"Менеджер проектов": ["ADTHPL-248"],          # координация межкомандных проектов
           "Руководитель проектов": ["ADTHPL-244"],      # график проектов, риски, статус
-          "Директор департамента": ["ADTHPL-249"]}      # портфель разработки и бюджет
+          "Директор департамента": ["ADTHPL-250"],      # бизнес-заказчики и приоритизация бэклога
+          "Ведущий разработчик проекта Эдтех": ["ADTHPL-226"],          # миграция данных между хранилищами
+          "Главный инженер по поддержке оборудования": ["ADTHPL-221"]}  # сопровождение показа рекламы (OPEX)
+# CAPEX чужой должности не берем (в сентябре заимствований не было, риск для капитализации)
 borrowed = {}
 for p in people:
     a = alloc[p["fio"]]
@@ -223,7 +226,7 @@ for p in people:
     else:
         want = round(p["H"] * SECOND_SHARE, 1)
     own = [n for n in role_tasks[(p["role"], tm.Признак)] if n != main]
-    other = [r.num for r in active.itertuples() if r.num != main and r.Признак == tm.Признак
+    other = [r.num for r in active.itertuples() if r.num != main and r.Признак == tm.Признак == "OPEX"
              and r._5 == tm._5 and r.Должность != p["role"]]
     pref = [n for n in PREFER.get(p["role"], []) if n != main]
     for pool in (pref, own, other):
