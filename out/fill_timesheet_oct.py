@@ -203,6 +203,47 @@ for p in people:
                 a[n] += need; load[n] += need
                 a[big] -= need; load[big] -= need
 
+# 5) правило «на сотрудника не менее 2 задач»: у кого одна задача — ~30% часов переносим
+#    на вторую задачу с тем же признаком (сначала задачи своей должности, затем задачи
+#    других должностей с тем же видом работ; внутри — тот же эпик, затем наименее загруженные)
+SECOND_SHARE = 0.3
+# у должностей с единственной задачей в каталоге на октябрь — смысловая пара
+PREFER = {"Менеджер проектов": ["ADTHPL-248"],          # координация межкомандных проектов
+          "Руководитель проектов": ["ADTHPL-244"],      # график проектов, риски, статус
+          "Директор департамента": ["ADTHPL-249"]}      # портфель разработки и бюджет
+borrowed = {}
+for p in people:
+    a = alloc[p["fio"]]
+    if len(a) != 1:
+        continue
+    main = next(iter(a))
+    tm = TASK[main]
+    if p["rate"] >= 1:
+        want = max(8, int(round(p["H"] * SECOND_SHARE / 8)) * 8)
+    else:
+        want = round(p["H"] * SECOND_SHARE, 1)
+    own = [n for n in role_tasks[(p["role"], tm.Признак)] if n != main]
+    other = [r.num for r in active.itertuples() if r.num != main and r.Признак == tm.Признак
+             and r._5 == tm._5 and r.Должность != p["role"]]
+    pref = [n for n in PREFER.get(p["role"], []) if n != main]
+    for pool in (pref, own, other):
+        room = lambda n: min(pcap(p, n), CAP_TASK - load[n])
+        cands = [n for n in pool if room(n) >= min(want, 8)]
+        if not cands:
+            continue
+        cands.sort(key=lambda n: (TASK[n].Эпик != tm.Эпик, room(n) < want, load[n], n))
+        n2 = cands[0]
+        h2 = min(want, room(n2))
+        if p["rate"] >= 1:
+            h2 = float(int(h2))
+        a[n2] = h2; load[n2] += h2
+        a[main] -= h2; load[main] -= h2
+        if pool is not own:
+            borrowed[p["fio"]] = n2
+        break
+print("ВТОРАЯ ЗАДАЧА ИЗ ДРУГОЙ ДОЛЖНОСТИ:", borrowed)
+print("ОДНА ЗАДАЧА:", [p["fio"] for p in people if len(alloc[p["fio"]]) < 2])
+
 problems = [(p["fio"], p["left"]) for p in people if sum(p["left"].values()) > 0.001]
 print("НЕ РАСПРЕДЕЛЕНО:", problems)
 over = {n: v for n, v in load.items() if v > CAP_TASK}
