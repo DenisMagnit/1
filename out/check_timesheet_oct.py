@@ -21,7 +21,7 @@ def wd(a, b):
         x += timedelta(1)
     return out
 
-o = pd.read_excel(OUT, sheet_name="Лист1")
+o = pd.read_excel(OUT, sheet_name="Лист1").rename(columns={"Рагруппировка": "Разгруппировка", "Гуид Физлица": "Гуид \nФизлица"})
 src = pd.read_excel(f"{IN}/5_oct_src.xlsx", sheet_name="Лист1")
 cat = pd.read_excel(f"{IN}/3_tasks.xlsx", sheet_name="Задачи")
 epi = pd.read_excel(f"{IN}/3_tasks.xlsx", sheet_name="Эпики").set_index("Эпик")
