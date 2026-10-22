@@ -203,29 +203,29 @@ for p in people:
                 a[n] += need; load[n] += need
                 a[big] -= need; load[big] -= need
 
-# 5) правило «на сотрудника не менее 2 задач»: у кого одна задача — ~30% часов переносим
-#    на вторую задачу с тем же признаком (сначала задачи своей должности, затем задачи
-#    других должностей с тем же видом работ; внутри — тот же эпик, затем наименее загруженные)
+# 5) правило «по капитализируемому ФОТ — не менее 2 CAPEX-задач»: у кого CAPEX на одной
+#    задаче — ~30% CAPEX-часов (кратно 8, мин. 8) переносим на вторую CAPEX-задачу своей
+#    должности (сначала тот же эпик, затем наименее загруженные). 100% OPEX — без изменений.
 SECOND_SHARE = 0.3
-# у должностей с единственной задачей в каталоге на октябрь — смысловая пара
-PREFER = {"Главный инженер по поддержке оборудования": ["ADTHPL-221", "ADTHPL-225", "ADTHPL-233"]}  # сопровождение промэксплуатации (OPEX)
-# CAPEX чужой должности не берем (в сентябре заимствований не было, риск для капитализации)
+# исключение: у должности одна CAPEX-задача на октябрь — берем ближайшую по смыслу CAPEX
+# другой должности (приемка и подготовка к запуску = вывод в промышленную среду)
+EXCEPT = {"Главный инженер по поддержке оборудования": ["ADTHPL-202"]}
 borrowed = {}
 for p in people:
     a = alloc[p["fio"]]
-    if len(a) != 1 or p["tgt"]["CAPEX"] <= 0:   # правило только для капитализируемого ФОТ
+    capt = [n for n in a if TASK[n].Признак == "CAPEX"]
+    if len(capt) != 1:
         continue
-    main = next(iter(a))
+    main = capt[0]
     tm = TASK[main]
+    hc = a[main]
     if p["rate"] >= 1:
-        want = max(8, int(round(p["H"] * SECOND_SHARE / 8)) * 8)
+        want = max(8, int(round(hc * SECOND_SHARE / 8)) * 8)
     else:
-        want = round(p["H"] * SECOND_SHARE, 1)
-    own = [n for n in role_tasks[(p["role"], tm.Признак)] if n != main]
-    other = [r.num for r in active.itertuples() if r.num != main and r.Признак == tm.Признак == "OPEX"
-             and r._5 == tm._5 and r.Должность != p["role"]]
-    pref = [n for n in PREFER.get(p["role"], []) if n != main]
-    for pool in (pref, own, other):
+        want = round(hc * SECOND_SHARE, 1)
+    own = [n for n in role_tasks[(p["role"], "CAPEX")] if n != main]
+    exc = [n for n in EXCEPT.get(p["role"], []) if n != main]
+    for pool in (own, exc):
         room = lambda n: min(pcap(p, n), CAP_TASK - load[n])
         cands = [n for n in pool if room(n) >= min(want, 8)]
         if not cands:
@@ -237,11 +237,11 @@ for p in people:
             h2 = float(int(h2))
         a[n2] = h2; load[n2] += h2
         a[main] -= h2; load[main] -= h2
-        if pool is not own:
+        if pool is exc:
             borrowed[p["fio"]] = n2
         break
 print("ВТОРАЯ ЗАДАЧА ИЗ ДРУГОЙ ДОЛЖНОСТИ:", borrowed)
-print("ОДНА ЗАДАЧА:", [p["fio"] for p in people if len(alloc[p["fio"]]) < 2])
+print("ОДНА CAPEX-ЗАДАЧА:", [p["fio"] for p in people if sum(TASK[n].Признак == "CAPEX" for n in alloc[p["fio"]]) == 1])
 
 problems = [(p["fio"], p["left"]) for p in people if sum(p["left"].values()) > 0.001]
 print("НЕ РАСПРЕДЕЛЕНО:", problems)
