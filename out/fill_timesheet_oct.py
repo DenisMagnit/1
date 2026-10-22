@@ -118,14 +118,50 @@ def pcap(p, num):
     w = task_window(p, num)
     return 0 if w is None else 8 * p["rate"] * w[2]
 
+# ================= РАСПРЕДЕЛЕНИЕ (единый набор правил) =================
+# Правила (по сентябрю + согласованные уточнения):
+#  R1  задачи — только своей должности по каталогу, активные в октябре; исключение — Клименко (EXCEPT)
+#  R2  доли: продакты 60% CAPEX / 40% OPEX; руководители команд 30/70; менеджмент, сопровождение,
+#      Гряда («нет в Jira») — 100% OPEX; остальные — 100% CAPEX
+#  R3  у кого есть CAPEX — не менее 2 CAPEX-задач: основная ~70%, вторая ~30% (кратно 8, не менее 16 ч);
+#      100% OPEX — одна задача (как в сентябре), вторая только если упираемся в лимит
+#  R4  ≤ 350 ч на задачу в месяц; ≤ 8 ч × ставка × раб. дни сотрудника в периоде работ по задаче
+#  R5  преемственность: задачи сентября, которые идут в октябре, сохраняются (OPEX 3 кв. → 4 кв.)
+#  R6  новые задачи — сначала незанятые/наименее загруженные (покрытие каталога), вторая — из того же эпика
+#  R7  строк < 8 ч не оставляем
+SECOND_SHARE, SECOND_MIN, ROW_MIN = 0.3, 16, 8
+EXCEPT = {"Главный инженер по поддержке оборудования": ["ADTHPL-202"]}  # приемка и подготовка к запуску
+
 load = defaultdict(float)
 alloc = defaultdict(lambda: OrderedDict())  # fio -> {num: hours}
 
+def feas(p, n):
+    """Сколько еще часов можно добавить в задачу n, чтобы на любом отрезке [a,b] сумма часов задач,
+    чей период работ лежит внутри отрезка, не превышала 8 ч × ставка × раб. дни без отпуска."""
+    w = task_window(p, n)
+    if w is None:
+        return 0
+    s0, e0, _ = w
+    mine = [(task_window(p, m), h) for m, h in alloc[p["fio"]].items() if m != n]
+    starts = {s0} | {x[0][0] for x in mine if x[0][0] <= s0}
+    ends = {e0} | {x[0][1] for x in mine if x[0][1] >= e0}
+    best = float("inf")
+    for a in starts:
+        for b in ends:
+            cap = 8 * p["rate"] * len([d for d in p["avail"] if a <= d <= b])
+            used = alloc[p["fio"]].get(n, 0) + sum(h for (ws, we, _), h in mine if a <= ws and we <= b)
+            best = min(best, cap - used)
+    return best
+
+def room(p, n):
+    return min(pcap(p, n) - alloc[p["fio"]].get(n, 0), CAP_TASK - load[n], feas(p, n))
+
 def give(p, num, h):
-    h = min(h, pcap(p, num) - alloc[p["fio"]].get(num, 0), CAP_TASK - load[num])
-    h = max(0, h)
+    h = max(0, min(h, room(p, num)))
     if p["rate"] >= 1:
         h = float(int(h))
+    else:
+        h = round(h, 1)
     if h <= 0:
         return 0
     alloc[p["fio"]][num] = alloc[p["fio"]].get(num, 0) + h
@@ -142,106 +178,136 @@ def targets(p):
     c = round(H * sh) if p["rate"] >= 1 else round(H * sh, 1)
     return {"CAPEX": c, "OPEX": H - c}
 
+def second_size(C):
+    return min(C / 2, max(SECOND_MIN, int(round(C * SECOND_SHARE / 8)) * 8))
+
+FAMILY = [{"Специалист по тестированию", "Ведущий специалист по тестированию", "Главный специалист по тестированию"},
+          {"Аналитик данных", "Ведущий аналитик данных"},
+          {"Разработчик", "Ведущий разработчик", "Главный разработчик"},
+          {"Системный аналитик", "Ведущий системный аналитик", "Главный системный аналитик"},
+          {"Ведущий специалист ML"},
+          {"Менеджер продукта", "Ведущий менеджер продукта"}]
+
+def pool(p, flag):
+    own = list(role_tasks[(p["role"], flag)])
+    return own + (EXCEPT.get(p["role"], []) if flag == "CAPEX" else [])
+
+def family_pool(p, flag):
+    fam = next((f for f in FAMILY if p["role"] in f), {p["role"]})
+    kinds = {TASK[n]._5 for n in role_tasks[(p["role"], flag)]}
+    return [r.num for r in active.itertuples() if r.Признак == flag and r.Должность in fam
+            and r.Должность != p["role"] and r._5 in kinds]
+
+def taken(p, flag):
+    return [n for n in alloc[p["fio"]] if TASK[n].Признак == flag]
+
 for p in people:
     p["tgt"] = targets(p)
     p["left"] = dict(p["tgt"])
-
-# 1) преемственность: задачи сентября, которые еще идут в октябре (квартальные OPEX -> 4 кв.)
-for p in people:
     cont = [(n, h) for n, h in sep_tasks.get(p["fio"], []) if n and n in active.num.values
             and TASK[n].Должность == p["role"]]
-    for flag in ("CAPEX", "OPEX"):
-        lst = [(n, h) for n, h in cont if TASK[n].Признак == flag]
-        if not lst or p["left"][flag] <= 0:
-            continue
-        tot = sum(h for _, h in lst)
-        want = p["left"][flag]
-        rest = want
-        for i, (n, h) in enumerate(lst):
-            share = rest if i == len(lst) - 1 else round(want * h / tot)
-            got = give(p, n, share)
-            rest -= got
-        p["left"][flag] = rest
+    p["cont"] = {f: sorted([(n, h) for n, h in cont if TASK[n].Признак == f], key=lambda x: -x[1])
+                 for f in ("CAPEX", "OPEX")}
 
-# 2) добор по свободным задачам должности: сначала наименее загруженные
-def fill(p, flag, pool):
+# Фаза 1 — преемственность
+for p in people:
+    C, O = p["tgt"]["CAPEX"], p["tgt"]["OPEX"]
+    cc = p["cont"]["CAPEX"]
+    if C > 0 and cc:
+        if len(cc) >= 2 and min(h for _, h in cc) >= SECOND_MIN:
+            tot = sum(h for _, h in cc)          # сентябрьская разбивка содержательная — сохраняем пропорции
+            for n, h in cc:
+                p["left"]["CAPEX"] -= give(p, n, round(C * h / tot))
+        else:
+            p["left"]["CAPEX"] -= give(p, cc[0][0], C - second_size(C))
+    if O > 0 and p["cont"]["OPEX"]:
+        p["left"]["OPEX"] -= give(p, p["cont"]["OPEX"][0][0], O)
+
+# Фаза 2 — добор: основная (если нет), затем вторая и далее до закрытия часов
+def pick(p, flag, need, main=None, prefer=(), new_only=False, src=None):
+    # сначала доливаем уже назначенные задачи с запасом емкости, затем берем новые
+    cands = [n for n in (src if src is not None else pool(p, flag)) if (not new_only or n not in alloc[p["fio"]])
+             and room(p, n) >= min(need, ROW_MIN)]
+    if not cands:
+        return None
+    ep = TASK[main].Эпик if main else None
+    return min(cands, key=lambda n: (n not in alloc[p["fio"]], n not in prefer, room(p, n) < min(need, 40),
+                                     ep is not None and TASK[n].Эпик != ep,
+                                     room(p, n) < need, load[n] > 0, load[n], -room(p, n), n))
+
+order = sorted(people, key=lambda p: (not p["cont"]["CAPEX"] and not p["cont"]["OPEX"], p["fio"]))
+for p in order:
+    C = p["tgt"]["CAPEX"]
+    if C > 0:
+        if not taken(p, "CAPEX"):
+            n = pick(p, "CAPEX", C - second_size(C), new_only=True)
+            if n:
+                p["left"]["CAPEX"] -= give(p, n, C - second_size(C))
+        prefer = [n for n, _ in p["cont"]["CAPEX"][1:]]
+        guard = 0
+        while (p["left"]["CAPEX"] > 0.001 or len(taken(p, "CAPEX")) < 2) and guard < 8:
+            guard += 1
+            main = max(taken(p, "CAPEX"), key=lambda n: alloc[p["fio"]][n]) if taken(p, "CAPEX") else None
+            need = p["left"]["CAPEX"]
+            if need <= 0.001:                     # часы закрыты, но задача одна — выделяем вторую из основной
+                need = second_size(C)
+                n = pick(p, "CAPEX", need, main, prefer, new_only=True)
+                if not n:
+                    break
+                h = give(p, n, need)
+                alloc[p["fio"]][main] -= h; load[main] -= h
+                continue
+            n = pick(p, "CAPEX", need, main, prefer, new_only=len(taken(p, "CAPEX")) < 2)
+            if not n:
+                break
+            p["left"]["CAPEX"] -= give(p, n, need)
     guard = 0
-    while p["left"][flag] > 0.001 and guard < 10:
+    while p["left"]["OPEX"] > 0.001 and guard < 8:
         guard += 1
-        cands = [n for n in pool if pcap(p, n) - alloc[p["fio"]].get(n, 0) > 0 and load[n] < CAP_TASK]
-        if not cands:
-            return
-        room = lambda n: min(pcap(p, n) - alloc[p["fio"]].get(n, 0), CAP_TASK - load[n])
-        cands.sort(key=lambda n: (room(n) < min(p["left"][flag], 80), load[n] > 0, load[n], -room(n), n))
-        got = give(p, cands[0], p["left"][flag])
-        p["left"][flag] -= got
-        if got == 0:
-            return
+        n = pick(p, "OPEX", p["left"]["OPEX"])
+        if not n:
+            break
+        p["left"]["OPEX"] -= give(p, n, p["left"]["OPEX"])
 
-order = sorted(people, key=lambda p: (len(sep_tasks.get(p["fio"], [])) > 0, p["fio"]))
+# Фаза 3 — если своих задач не хватило по срокам: CAPEX → задачи соседнего грейда той же профессии
+#           (тот же вид работ), затем остаток — на задачи другого признака своей должности
 for p in order:
-    for flag in ("CAPEX", "OPEX"):
-        fill(p, flag, role_tasks[(p["role"], flag)])
-# 3) остаток, если CAPEX-емкости не хватило, — на OPEX задачи должности (и наоборот)
+    guard = 0
+    while p["left"]["CAPEX"] > 0.001 and guard < 8:
+        guard += 1
+        n = pick(p, "CAPEX", p["left"]["CAPEX"], src=family_pool(p, "CAPEX") + taken(p, "CAPEX"))
+        if not n:
+            break
+        p["left"]["CAPEX"] -= give(p, n, p["left"]["CAPEX"])
 for p in order:
-    for flag, other in (("CAPEX", "OPEX"), ("OPEX", "CAPEX")):
-        if p["left"][flag] > 0.001:
-            p["left"][other] += p["left"][flag]
-            p["left"][flag] = 0
-            fill(p, other, role_tasks[(p["role"], other)])
+    for f, g in (("CAPEX", "OPEX"), ("OPEX", "CAPEX")):
+        guard = 0
+        while p["left"][f] > 0.001 and guard < 8:
+            guard += 1
+            n = pick(p, g, p["left"][f])
+            if not n:
+                break
+            p["left"][f] -= give(p, n, p["left"][f])
 
-# 4) «огрызки» < 8 ч (после лимита 350) добиваем до 8 ч за счет основной задачи сотрудника
+# Фаза 4 — строки < 8 ч добиваем до 8 ч за счет основной задачи того же признака
 for p in people:
     a = alloc[p["fio"]]
-    if p["rate"] < 1 or len(a) < 2:
-        continue
     for n, h in list(a.items()):
-        if h < 8:
-            big = max(a, key=a.get)
-            need = min(8 - h, CAP_TASK - load[n], pcap(p, n) - h)
-            if big != n and need > 0:
-                a[n] += need; load[n] += need
-                a[big] -= need; load[big] -= need
+        if 0 < h < ROW_MIN and p["rate"] >= 1:
+            same = [m for m in a if m != n and TASK[m].Признак == TASK[n].Признак]
+            if not same:
+                continue
+            big = max(same, key=a.get)
+            need = min(ROW_MIN - h, CAP_TASK - load[n], pcap(p, n) - h)
+            if need > 0:
+                a[n] += need; load[n] += need; a[big] -= need; load[big] -= need
 
-# 5) правило «по капитализируемому ФОТ — не менее 2 CAPEX-задач»: у кого CAPEX на одной
-#    задаче — ~30% CAPEX-часов (кратно 8, мин. 8) переносим на вторую CAPEX-задачу своей
-#    должности (сначала тот же эпик, затем наименее загруженные). 100% OPEX — без изменений.
-SECOND_SHARE = 0.3
-# исключение: у должности одна CAPEX-задача на октябрь — берем ближайшую по смыслу CAPEX
-# другой должности (приемка и подготовка к запуску = вывод в промышленную среду)
-EXCEPT = {"Главный инженер по поддержке оборудования": ["ADTHPL-202"]}
-borrowed = {}
-for p in people:
-    a = alloc[p["fio"]]
-    capt = [n for n in a if TASK[n].Признак == "CAPEX"]
-    if len(capt) != 1:
-        continue
-    main = capt[0]
-    tm = TASK[main]
-    hc = a[main]
-    if p["rate"] >= 1:
-        want = max(8, int(round(hc * SECOND_SHARE / 8)) * 8)
-    else:
-        want = round(hc * SECOND_SHARE, 1)
-    own = [n for n in role_tasks[(p["role"], "CAPEX")] if n != main]
-    exc = [n for n in EXCEPT.get(p["role"], []) if n != main]
-    for pool in (own, exc):
-        room = lambda n: min(pcap(p, n), CAP_TASK - load[n])
-        cands = [n for n in pool if room(n) >= min(want, 8)]
-        if not cands:
-            continue
-        cands.sort(key=lambda n: (TASK[n].Эпик != tm.Эпик, room(n) < want, load[n], n))
-        n2 = cands[0]
-        h2 = min(want, room(n2))
-        if p["rate"] >= 1:
-            h2 = float(int(h2))
-        a[n2] = h2; load[n2] += h2
-        a[main] -= h2; load[main] -= h2
-        if pool is exc:
-            borrowed[p["fio"]] = n2
-        break
-print("ВТОРАЯ ЗАДАЧА ИЗ ДРУГОЙ ДОЛЖНОСТИ:", borrowed)
-print("ОДНА CAPEX-ЗАДАЧА:", [p["fio"] for p in people if sum(TASK[n].Признак == "CAPEX" for n in alloc[p["fio"]]) == 1])
+borrowed = {p["fio"]: [n for n in alloc[p["fio"]] if TASK[n].Должность != p["role"]] for p in people}
+borrowed = {k: v for k, v in borrowed.items() if v}
+print("ЗАДАЧИ ЧУЖОЙ ДОЛЖНОСТИ:", borrowed)
+print("<2 CAPEX-ЗАДАЧ ПРИ CAPEX:", [p["fio"] for p in people if p["tgt"]["CAPEX"] > 0 and len(taken(p, "CAPEX")) < 2])
+print("ОТКЛОНЕНИЕ ДОЛЕЙ:", [(p["fio"], p["tgt"]) for p in people
+                          if abs(sum(alloc[p["fio"]].get(n, 0) for n in taken(p, "CAPEX")) - p["tgt"]["CAPEX"]) > 0.01])
 
 problems = [(p["fio"], p["left"]) for p in people if sum(p["left"].values()) > 0.001]
 print("НЕ РАСПРЕДЕЛЕНО:", problems)
@@ -324,3 +390,4 @@ capx = sum(h for a in alloc.values() for n, h in a.items() if TASK[n].Призн
 print(f"людей {len(people)}, строк {row - 2}, часов {tot}, CAPEX {capx} ({capx / tot:.1%})")
 used_renamed = [n for n in load if TASK[n].renamed]
 print("использованы переименованные задачи:", used_renamed)
+
