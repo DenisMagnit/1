@@ -62,9 +62,12 @@ errs = [f"{n}: {g[n]} vs {s_idx.loc[n, 'Списать часов']}" for n in g
         if abs(g[n] - s_idx.loc[n, "Списать часов"]) > 0.01]
 check("3. сумма часов по строкам = «Списать часов» по каждому сотруднику", errs)
 
-# 4. не менее 2 задач
+# 4. не менее 2 задач — для сотрудников с CAPEX (капитализируемый ФОТ)
 c = o.groupby("ФИО сотрудника")["Задача"].nunique()
-check("4. на сотрудника не менее 2 задач", [f"{n}: {c[n]}" for n in c.index if c[n] < 2])
+hascx = set(o.loc[o["Признак"] == "CAPEX", "ФИО сотрудника"])
+check("4. у сотрудников с CAPEX (%d чел.) не менее 2 задач" % len(hascx),
+      [f"{n}: {c[n]}" for n in c.index if n in hascx and c[n] < 2])
+print("INFO    100%% OPEX: %d чел., из них с одной задачей: %d" % (len(c) - len(hascx), sum(1 for n in c.index if n not in hascx and c[n] < 2)))
 
 # 5. дубликаты сотрудник+задача, пустые/нулевые часы
 dup = o[o.duplicated(["ФИО сотрудника", "Задача"], keep=False)]
