@@ -1,12 +1,13 @@
 """Независимая финальная проверка таймшита AdTech за ноябрь 2026 (код не связан со скриптом распределения).
-Запуск: python3 -I verify_final_nov.py <исходник ноября.xlsx> <каталог.xlsx> <итоговый файл.xlsx> [HR-группировки ...]"""
+Наименования задач берутся из реестра для Jira (лист «Строки табеля»): в табеле по шаблону только код ADTHPL.
+Запуск: python3 -I verify_final_nov.py <исходник ноября.xlsx> <каталог.xlsx> <итоговый файл.xlsx> <реестр для Jira.xlsx> [HR-группировки ...]"""
 import sys, re
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 import openpyxl
 import pandas as pd
 
-SRC, CATALOG, F, HR = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+SRC, CATALOG, F, REG, HR = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5:]
 M0, M1 = date(2026, 11, 1), date(2026, 11, 30)
 HOL, SHORT = {date(2026, 11, 4)}, {date(2026, 11, 3): 7}
 errors = []
@@ -49,6 +50,19 @@ H, Hs = [c.value for c in ws[1]], [c.value for c in ws_src[1]]
 rows = [[c.value for c in r] for r in ws.iter_rows(min_row=2)]
 src_rows = [[c.value for c in r] for r in ws_src.iter_rows(min_row=2) if r[3].value]
 ix, ixs = {h: i for i, h in enumerate(H)}, {h: i for i, h in enumerate(Hs)}
+# реестр: строка табеля -> наименование задачи
+reg = pd.read_excel(REG, sheet_name="Строки табеля")
+regt = pd.read_excel(REG, sheet_name="Задачи для Jira")
+reg_bad = []
+if len(reg) != len(rows):
+    reg_bad.append(f"строк в реестре {len(reg)} ≠ {len(rows)}")
+for (_, g), r in zip(reg.iterrows(), rows):
+    same = (g["ФИО сотрудника"] == r[ix["ФИО сотрудника"]] and g["Признак"] == r[ix["Признак"]] and g["Вид работ"] == r[ix["Вид работ"]]
+            and g["Период списания"] == r[ix["Период списания"]] and abs(g["Списать часов"] - r[ix["Списать часов"]]) < 1e-9)
+    if not same:
+        reg_bad.append(f"строка {g['Строка табеля']}: {g['ФИО сотрудника']}")
+ix["Наименование задачи"] = len(H)
+rows = [r + [str(g).strip()] for r, g in zip(rows, reg["Наименование задачи"])]
 
 cat = pd.read_excel(CATALOG, sheet_name="Задачи")
 epi = pd.read_excel(CATALOG, sheet_name="Эпики").set_index("Эпик")
@@ -57,15 +71,17 @@ assert len(CAT) == len(cat)
 
 print("=== A. Формат (эталон — шаблон ноября) ===")
 report("A1. листы — как в исходнике", [] if wb.sheetnames == wb_src.sheetnames else [f"{wb.sheetnames}"], ", ".join(wb.sheetnames))
-exp_h = Hs[:19] + ["Наименование задачи"] + Hs[19:]
-report("A2. колонки исходника + «Наименование задачи» после «Вид работ» (23)", [] if H == exp_h else [f"{H}"])
+report("A2. колонки и заголовки — строго как в шаблоне (22)", [] if H == Hs else [f"{H}"])
+report("A2a. ширины колонок и условное форматирование — как в шаблоне",
+       ([] if {k: v.width for k, v in ws.column_dimensions.items()} == {k: v.width for k, v in ws_src.column_dimensions.items()} else ["ширины"]) +
+       ([] if [str(c.sqref) for c in ws.conditional_formatting] == [str(c.sqref) for c in ws_src.conditional_formatting] else ["условное форматирование"]))
 srcc = {r[3].value: r for r in ws_src.iter_rows(min_row=2) if r[3].value}
 bad = [c.coordinate for r in ws.iter_rows(min_row=2) for c in r[:17]
        if c.number_format != srcc[r[3].value][c.column - 1].number_format]
 report("A3. форматы ячеек исходника (в т.ч. даты отсутствия) сохранены", bad)
-extra = [c.coordinate for r in ws.iter_rows() for c in r if c.column > 23 and c.value is not None]
+extra = [c.coordinate for r in ws.iter_rows() for c in r if c.column > 22 and c.value is not None]
 report("A4. нет лишних колонок и пустых строк", extra + [f"пустая строка {i + 2}" for i, r in enumerate(rows) if not r[3]])
-report("A5. автофильтр по всему диапазону", [] if ws.auto_filter.ref == f"A1:W{ws.max_row}" else [ws.auto_filter.ref])
+report("A5. автофильтр по всему диапазону", [] if ws.auto_filter.ref == f"A1:V{ws.max_row}" else [ws.auto_filter.ref])
 bad = []
 for sh in wb_src.sheetnames[1:]:
     a = [list(r) for r in wb[sh].iter_rows(values_only=True)]
@@ -111,6 +127,15 @@ bad = [f"{s[3]}: {s[13]} ≠ {s[12]} × (159 − {sum(dh(d) for d in absd[s[3]])
        if abs(s[13] - (s[12] or 1) * (159 - sum(dh(d) for d in absd[s[3]]))) > 0.05]
 report("B4. исходник: часы = ставка × (норма 159 ч − отсутствие; 3.11 — 7 ч, 4.11 — праздник)", bad)
 
+print("=== R. Реестр задач для Jira ===")
+tot_reg = reg.groupby("Наименование задачи")["Списать часов"].sum()
+rb = []
+if set(regt["Наименование задачи"]) != set(tot_reg.index):
+    rb.append("состав задач листа «Задачи для Jira» ≠ строкам табеля")
+else:
+    rb += [n for n, h in zip(regt["Наименование задачи"], regt["Часов в ноябре"]) if abs(h - tot_reg[n]) > 0.05]
+report("R1. реестр построчно совпадает с табелем (ФИО, признак, вид работ, период, часы)", reg_bad)
+report("R2. лист «Задачи для Jira»: каждая задача один раз, часы = сумме строк", rb, f"{len(regt)} задач")
 print("=== C. Задачи — по каталогу ===")
 bad, act, phase, epw, code = [], [], [], [], []
 for r in rows:

@@ -4,15 +4,18 @@
   * норма 159 ч: 20 рабочих дней, 4.11 — праздник, 3.11 — сокращенный день (7 ч);
   * каталог — «Каталог_задач_AdTech_2026-2027_МСФО.xlsx», задача определяется строкой каталога;
   * номер задачи в Jira неизвестен (переименованные задачи заводятся заново, октябрьские номера Jira к каталогу
-    не сопоставляются) — в колонке «Задача» только код проекта ADTHPL, наименование — в отдельной колонке;
+    не сопоставляются) — в колонке «Задача» только код проекта ADTHPL;
   * преемственности с октябрем нет: загруженный октябрьский табель (выгрузка МСФО) не совпадает с нашим
     и не содержит наименований задач;
-  * формат — шаблон ноября: «Признак», «Вид работ», «Наименование задачи» (добавлена), «Задача»,
-    «Период списания» (срок задачи ∩ ноябрь, со сдвигом на отпуск), «Комментарий» (только из исходника);
+  * табель — строго в колонках шаблона ноября: «Признак», «Вид работ», «Задача», «Период списания»
+    (срок задачи ∩ ноябрь, со сдвигом на отпуск), «Комментарий» (только из исходника); ширины, фильтр и
+    условное форматирование шаблона не меняются;
+  * наименования задач — в отдельном реестре для Jira (4-й аргумент): лист «Задачи для Jira» (что завести,
+    колонка для номера) и «Строки табеля» (какой строке табеля какая задача);
   * Гряда — 100% OPEX на сопровождение отчетности Эдтех (МСФО за октябрь: «проект вне ОМНИ», в «Бизнес ИТМ» — FINANCE);
   * часы, которые не помещаются в задачи своей должности и профессии (сроки задач в ноябре), уходят на OPEX-задачи
     родственной должности (FALLBACK_OPEX) — открытый вопрос.
-Запуск: python3 -I fill_timesheet_nov.py <исходник ноября.xlsx> <каталог.xlsx> <результат.xlsx>
+Запуск: python3 -I fill_timesheet_nov.py <исходник ноября.xlsx> <каталог.xlsx> <результат.xlsx> [<реестр для Jira.xlsx>]
 """
 import sys, copy, math
 from datetime import date, datetime, timedelta
@@ -21,6 +24,7 @@ import pandas as pd
 import openpyxl
 
 SRC, CATALOG, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
+REG = sys.argv[4] if len(sys.argv) > 4 else None
 
 M_START, M_END = date(2026, 11, 1), date(2026, 11, 30)
 HOLIDAYS = {date(2026, 11, 4)}
@@ -344,17 +348,14 @@ print("ОТКЛОНЕНИЕ ДОЛЕЙ (факт CAPEX ≠ таргет):", [d f
 print("НЕ РАСПРЕДЕЛЕНО:", [(p["fio"], p["left"]) for p in people if sum(p["left"].values()) > 0.001])
 print("ПРЕВЫШЕНИЕ 350:", {n: v for n, v in load.items() if v > CAP_TASK})
 
-# ---------- запись ----------
-NEW_HDR = hdr[:19] + ["Наименование задачи"] + hdr[19:]
+# ---------- запись: строго колонки шаблона ноября ----------
 src_style = {p["fio"]: [copy.copy(c._style) for c in p["cells"]] for p in people}
-hstyles = [copy.copy(c._style) for c in ws[1]]
+hdr_cells = [(c.value, copy.copy(c._style)) for c in ws[1]]
 tmpl = [copy.copy(c._style) for c in src_rows[0]]
-widths = {k: v.width for k, v in ws.column_dimensions.items()}
 ws.delete_rows(1, ws.max_row)
-col_src = list(range(19)) + [18, 19, 20, 21]          # стиль новой колонки — как у «Вид работ»
-for j, h in enumerate(NEW_HDR):
-    ws.cell(row=1, column=j + 1, value=h)._style = copy.copy(hstyles[col_src[j]])
-row = 2
+for j, (h, st) in enumerate(hdr_cells):
+    ws.cell(row=1, column=j + 1, value=h)._style = st
+row, reg = 2, []
 for p in people:
     v = [c.value for c in p["cells"]]
     items = sorted(alloc[p["fio"]].items(), key=lambda x: (-x[1], TASK[x[0]]["flag"] != "CAPEX", TASK[x[0]]["row"]))
@@ -362,22 +363,13 @@ for p in people:
         t = TASK[k]
         s, e, _ = task_window(p, k)
         hv = int(h) if p["rate"] >= 1 else h
-        vals = v[:13] + [hv] + v[14:17] + [t["flag"], t["kind"], t["name"], JIRA,
-                                           f"{s:%d.%m.%Y} - {e:%d.%m.%Y}", p["comment"]]
+        period = f"{s:%d.%m.%Y} - {e:%d.%m.%Y}"
+        vals = v[:13] + [hv] + v[14:17] + [t["flag"], t["kind"], JIRA, period, p["comment"]]
         for j, val in enumerate(vals):
-            c = ws.cell(row=row, column=j + 1, value=val)
-            c._style = copy.copy(src_style[p["fio"]][j] if j < 17 else tmpl[col_src[j]])
+            ws.cell(row=row, column=j + 1, value=val)._style = copy.copy(src_style[p["fio"]][j] if j < 17 else tmpl[j])
+        reg.append([row, p["fio"], p["pos"], t["flag"], t["kind"], t["name"], period, hv, k])
         row += 1
-letters = [openpyxl.utils.get_column_letter(i) for i in range(1, 24)]
-for k, w in widths.items():
-    if k in letters[:19]:
-        ws.column_dimensions[k].width = w
-ws.column_dimensions["S"].width = 30
-ws.column_dimensions["T"].width = 95
-ws.column_dimensions["U"].width = 11
-ws.column_dimensions["V"].width = 24
-ws.column_dimensions["W"].width = 28
-ws.auto_filter.ref = f"A1:W{row - 1}"
+ws.auto_filter.ref = f"A1:V{row - 1}"
 
 # лист «Отсутствуют в списках ноября»: формулы XLOOKUP ссылаются на внешнюю книгу — оставляем значения
 vals_wb = openpyxl.load_workbook(SRC, data_only=True)
@@ -388,6 +380,44 @@ for sh in wb.sheetnames[1:]:
                 c1.value = c2.value
 wb._external_links = []
 wb.save(OUT)
+
+# ---------- реестр задач для Jira (отдельный файл, в табель не входит) ----------
+if REG:
+    src_cat = pd.read_excel(CATALOG.replace("_МСФО", "_исходный"), sheet_name="Задачи") if "_МСФО" in CATALOG else None
+    from openpyxl.styles import Font, PatternFill, Alignment
+    rb = openpyxl.Workbook()
+    B, Y = Font(name="Calibri", bold=True, size=10), PatternFill("solid", fgColor="FFFF00")
+    F10 = Font(name="Calibri", size=10)
+    w1 = rb.active; w1.title = "Задачи для Jira"
+    h1 = ["Наименование задачи", "Признак", "Вид работ", "Модуль платформы", "Эпик", "Срок задачи (каталог)",
+          "Часов в ноябре", "Сотрудников", "Наименование в каталоге до правки МСФО", "Номер задачи в Jira"]
+    w1.append(h1)
+    used = OrderedDict()
+    for r in reg:
+        used.setdefault(r[8], [0.0, set()]); used[r[8]][0] += r[7]; used[r[8]][1].add(r[1])
+    for k in sorted(used, key=lambda k: TASK[k]["row"]):
+        t = TASK[k]
+        old = src_cat["Наименование задачи"].iat[t["row"] - 2].strip() if src_cat is not None else ""
+        w1.append([t["name"], t["flag"], t["kind"], cat["Модуль платформы"].iat[t["row"] - 2], t["epic"],
+                   f"{t['s']:%d.%m.%Y} - {t['e']:%d.%m.%Y}", round(used[k][0], 1), len(used[k][1]),
+                   old if old != t["name"] else "", None])
+    w2 = rb.create_sheet("Строки табеля")
+    w2.append(["Строка табеля", "ФИО сотрудника", "Должность сотрудника", "Признак", "Вид работ",
+               "Наименование задачи", "Период списания", "Списать часов"])
+    for r in reg:
+        w2.append(r[:8])
+    for w, widths in ((w1, [90, 9, 30, 30, 50, 24, 10, 10, 90, 16]), (w2, [9, 34, 34, 9, 30, 90, 24, 10])):
+        for c in w[1]:
+            c.font, c.alignment = B, Alignment(wrap_text=True, vertical="top")
+        for rr in w.iter_rows(min_row=2):
+            for c in rr:
+                c.font = F10
+        for jj, wd in enumerate(widths):
+            w.column_dimensions[openpyxl.utils.get_column_letter(jj + 1)].width = wd
+        w.auto_filter.ref = w.dimensions
+        w.freeze_panes = "A2"
+    w1.cell(1, 10).fill = Y
+    rb.save(REG)
 
 tot = sum(p["H"] for p in people)
 capx = sum(h for a in alloc.values() for n, h in a.items() if TASK[n]["flag"] == "CAPEX")
