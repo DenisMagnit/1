@@ -1,11 +1,11 @@
-"""Drop supplier / non-supplier sub-rows for Instore digital and DMP; target and 'vs target' move to the direction row (whole direction vs supplier target)."""
+"""Drop supplier / non-supplier sub-rows for DMP and Online+DMP (Instore digital keeps them); target and 'vs target' move to the direction row (whole direction vs supplier target)."""
 import sys
 from pptx import Presentation
 from pptx.oxml.ns import qn
 SRC, OUT = sys.argv[1:3]
 # exact values: (без не РН, с не РН, таргет) — 10М из F.pkl, 10+2 = 10М + прогноз мастера, таргеты из mc.xlsx
-V = {0: {'Instore digital': (1383.2, 1972.8, 1633.2), 'DMP': (40.3, 40.8, 73.0)},
-     1: {'Instore digital': (2073.2, 2662.8, 2509.0), 'DMP': (52.0, 52.6, 110.0)}}
+V = {0: {'DMP': (40.3, 40.8, 73.0), 'Online+DMP': (399.3, 789.4, 780.0)},
+     1: {'DMP': (52.0, 52.6, 110.0), 'Online+DMP': (509.8, 1015.2, 1020.0)}}
 fmt = lambda v: f'{round(v):,}'.replace(',', ' ')
 def pct(a, b):
     p = round((a / b - 1) * 100)
