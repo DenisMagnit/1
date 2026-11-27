@@ -8,6 +8,8 @@ from pptx import Presentation
 from pptx.util import Emu, Pt
 from pptx.oxml.ns import qn
 SRC, OUT, PLAN, MASTER = sys.argv[1:5]
+SRC_I = int(sys.argv[5]) if len(sys.argv) > 5 else 0        # slide to clone (0-based)
+Y0 = int(sys.argv[6]) if len(sys.argv) > 6 else 1041400      # top of the content
 A = 'http://schemas.openxmlformats.org/drawingml/2006/main'
 # ---- data
 rows = [r for r in list(openpyxl.load_workbook(PLAN, read_only=True, data_only=True).worksheets[0].iter_rows(values_only=True))[3:] if r[5] is not None]
@@ -63,15 +65,15 @@ def add_text(s, x, y, w, h, text, sz=14, b=True, col='000000'):
     return tb
 # ---- slide
 p = Presentation(SRC)
-src = p.slides[0]
+src = p.slides[SRC_I]
 s = dup_slide(p, src)
 for sh in list(s.shapes):
     if sh.has_table: sh._element.getparent().remove(sh._element)
 tp = title_shape(s).text_frame.paragraphs[0]
 for r in tp.runs[1:]: r._r.getparent().remove(r._r)
-tp.runs[0].text = f'E-com ноябрь 2026: в системе заведено {num(TOT)} млн руб. – {pc(TOT / FC_NOV)} прогноза'
+tp.runs[0].text = f'E-com ноябрь: в системе {num(TOT)} млн руб. – {pc(TOT / FC_NOV)} прогноза'
 tp.runs[0]._r.find(qn('a:rPr')).set('lang', 'ru-RU')
-X0, X1, Y0 = 368300, 6400000, 1041400
+X0, X1 = 368300, 6400000
 add_text(s, X0, Y0, 5600000, 300000, 'Операции в системе против прогноза')
 add_text(s, X1, Y0, 5423700, 300000, 'Заведение операций по неделям, млн руб.')
 # left table
